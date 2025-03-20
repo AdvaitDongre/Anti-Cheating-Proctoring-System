@@ -9,7 +9,7 @@ import tempfile
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-class SpeakerDetector:
+class GeminiSpeakerDetector:
     def __init__(self, api_key, format=pyaudio.paInt16, channels=1, rate=16000, chunk=1024, 
                  record_seconds=3):
         self.format = format
@@ -17,9 +17,9 @@ class SpeakerDetector:
         self.rate = rate
         self.chunk = chunk
         self.record_seconds = record_seconds
-        load_dotenv()
+        
         # Configure Gemini API
-        api_key = os.getenv("GEMINI_API_KEY")
+        os.environ["GEMINI_API_KEY"] = api_key
         genai.configure(api_key=api_key)
         
         # Create the model
@@ -51,16 +51,10 @@ class SpeakerDetector:
         self.temp_dir = tempfile.mkdtemp()
         self.temp_wav = os.path.join(self.temp_dir, "temp_audio.wav")
         
-        # Statistics
-        self.total_frames = 0
-        self.multiple_speaker_frames = 0
-        self.detection_start_time = None
-        
     def record_audio(self):
         """Record audio continuously and process in chunks"""
         self.is_recording = True
         self.stop_recording = False
-        self.detection_start_time = time.time()
         
         self.stream = self.p.open(
             format=self.format,
@@ -71,6 +65,7 @@ class SpeakerDetector:
         )
         
         print("Starting speaker detection...")
+        print("Press Ctrl+C to stop")
         
         while not self.stop_recording:
             # Collect audio for specified duration
@@ -86,10 +81,7 @@ class SpeakerDetector:
                 self._save_audio(frames)
                 
                 # Analyze the audio for speaker count
-                result = self._analyze_audio()
-                self.total_frames += 1
-                if result:
-                    self.multiple_speaker_frames += 1
+                self._analyze_audio()
                 
     def _save_audio(self, frames):
         """Save recorded audio to a temporary WAV file"""
@@ -101,9 +93,7 @@ class SpeakerDetector:
         wf.close()
     
     def _analyze_audio(self):
-        """Send audio to Gemini API for speaker detection
-        Returns True if multiple speakers detected, False otherwise"""
-        multiple_speakers_detected = False
+        """Send audio to Gemini API for speaker detection"""
         try:
             # Read the audio file
             with open(self.temp_wav, "rb") as audio_file:
@@ -128,18 +118,26 @@ class SpeakerDetector:
             
             # Check if response indicates multiple speakers
             if "2" in text_response or "multiple" in text_response.lower():
-                multiple_speakers_detected = True
+                print("\033[91m[ALERT] MULTIPLE SPEAKERS DETECTED!\033[0m")  # Red alert
+            else:
+                print("\033[92m[OK] Single speaker detected\033[0m")  # Green status
                 
         except Exception as e:
             print(f"Error in audio analysis: {e}")
-            
-        return multiple_speakers_detected
     
     def start(self):
         """Start the recording process in a separate thread"""
         self.recording_thread = threading.Thread(target=self.record_audio)
         self.recording_thread.daemon = True
         self.recording_thread.start()
+        
+        try:
+            # Keep the main thread alive until Ctrl+C
+            while self.recording_thread.is_alive():
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self.stop()
+            print("Speaker detection stopped")
     
     def stop(self):
         """Stop the recording process"""
@@ -161,106 +159,18 @@ class SpeakerDetector:
         """Clean up PyAudio"""
         self.stop()
         self.p.terminate()
-        
-    def get_statistics(self):
-        """Return statistics about speaker detection"""
-        elapsed_time = 0
-        if self.detection_start_time:
-            elapsed_time = time.time() - self.detection_start_time
-            
-        stats = {
-            "total_frames": self.total_frames,
-            "multiple_speaker_frames": self.multiple_speaker_frames,
-            "detection_percentage": (self.multiple_speaker_frames / self.total_frames * 100) if self.total_frames > 0 else 0,
-            "elapsed_time": elapsed_time
-        }
-        return stats
-    
-    def multiple_speakers_detected(self):
-        """Check if multiple speakers are currently detected"""
-        # Consider multiple speakers detected if at least 2 of the last 3 frames had multiple speakers
-        # This is a simple heuristic to reduce false positives
-        return self.multiple_speaker_frames > 0 and self.total_frames > 0
-    
-
-
-def main():
-    import os
-    import time
-    import sys
-    import signal
-    from dotenv import load_dotenv
-    
-    # Load environment variables for API key
-    load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
-    
-    if not api_key:
-        print("Error: GEMINI_API_KEY not found in environment variables.")
-        print("Please create a .env file with your GEMINI_API_KEY=your_key_here")
-        sys.exit(1)
-    
-    # Create the speaker detector
-    detector = SpeakerDetector(api_key=api_key)
-    
-    # Handle graceful shutdown
-    def signal_handler(sig, frame):
-        print("\nShutting down speaker detection...")
-        detector.stop()
-        detector.close()
-        
-        # Display final statistics
-        stats = detector.get_statistics()
-        print("\nFinal Statistics:")
-        print(f"Total audio chunks analyzed: {stats['total_frames']}")
-        print(f"Chunks with multiple speakers detected: {stats['multiple_speaker_frames']}")
-        print(f"Multiple speaker detection percentage: {stats['detection_percentage']:.2f}%")
-        print(f"Total elapsed time: {stats['elapsed_time']:.2f} seconds")
-        
-        sys.exit(0)
-    
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Start the detection
-    print("Starting speaker detection system...")
-    print("Press Ctrl+C to stop")
-    
-    # Start recording and detection
-    detector.start()
-    
-    try:
-        # Display real-time statistics while running
-        last_status_time = time.time()
-        status_interval = 2  # Update status every 2 seconds
-        
-        while True:
-            current_time = time.time()
-            
-            # Print status update at regular intervals
-            if current_time - last_status_time >= status_interval:
-                stats = detector.get_statistics()
-                
-                # Clear line and print status
-                sys.stdout.write("\r" + " " * 80 + "\r")  # Clear line
-                sys.stdout.write(f"Analyzed: {stats['total_frames']} chunks | ")
-                sys.stdout.write(f"Multiple speakers: {stats['multiple_speaker_frames']} chunks | ")
-                sys.stdout.write(f"Detection rate: {stats['detection_percentage']:.2f}% | ")
-                sys.stdout.write(f"Running: {stats['elapsed_time']:.1f}s")
-                sys.stdout.flush()
-                
-                last_status_time = current_time
-            
-            time.sleep(0.1)  # Sleep to prevent high CPU usage
-            
-    except KeyboardInterrupt:
-        # This will be caught by the signal handler
-        pass
-    finally:
-        # Ensure cleanup happens
-        detector.stop()
-        detector.close()
 
 if __name__ == "__main__":
-    main()
+    # Replace with your actual Gemini API key
+    load_dotenv()
+    
+    API_KEY = os.environ["GEMINI_API_KEY"]
+    
+    # Initialize and start the detector
+    detector = GeminiSpeakerDetector(api_key=API_KEY, record_seconds=3)
+    try:
+        detector.start()
+    except KeyboardInterrupt:
+        print("Stopping...")
+    finally:
+        detector.close()
