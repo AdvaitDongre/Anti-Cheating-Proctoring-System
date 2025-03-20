@@ -5,7 +5,7 @@ import numpy as np
 from eye_monitor import EyeMonitor
 from cheating_detector import CheatingDetector
 from head_posture_monitor import process_head_pose
-from pupil_tracker import PupilTracker  # Import the pupil tracker
+from pupil_tracker import GazeTracker  # Update import to use GazeTracker instead of PupilTracker
 from mask_detector import MaskDetector  # Import the mask detector
 from multiple_face_detector import MultipleFaceDetector  # Import the multiple face detector
 
@@ -103,10 +103,10 @@ def main():
     pupil_tracker = None
     if args.use_pupil_tracking:
         try:
-            pupil_tracker = PupilTracker(shape_predictor_path=args.predictor)
+            pupil_tracker = GazeTracker(args.predictor)  # Update to use GazeTracker
             print("Pupil tracker initialized successfully.")
         except Exception as e:
-            print(f"Error initializing PupilTracker: {e}")
+            print(f"Error initializing GazeTracker: {e}")
             print("Pupil tracking will be disabled.")
     
     # Initialize mask detector if enabled
@@ -200,7 +200,7 @@ def main():
         pupil_data = None
         
         if pupil_tracker:
-            pupil_frame, pupil_gaze_direction, pupil_data = pupil_tracker.process_eye_movement(pupil_frame)
+            pupil_frame, pupil_gaze_direction, pupil_data = pupil_tracker.process_frame(pupil_frame)  # Update method call
             
             # If we have pupil data and it's more accurate, use it to update eye metrics
             if pupil_data and pupil_data["left_pupil"] and pupil_data["right_pupil"]:
@@ -486,7 +486,7 @@ def main():
         elif key == ord('m'):
             # Toggle display mode - include mask mode if enabled
             if mask_detector:
-                modes = ['split', 'eye', 'cheat', 'head', 'pupil', 'mask', 'faces', 'combined'] if pupil_tracker else ['split', 'eye', 'cheat', 'head', 'mask', 'faces', 'combined']
+                modes = ['split', 'eye', 'cheat', 'head', 'pupil', 'mask', 'faces', 'combined'] if pupil_tracker else ['split', 'eye', 'cheat', 'head', 'pupil', 'mask', 'faces', 'combined']
             else:
                 modes = ['split', 'eye', 'cheat', 'head', 'pupil', 'faces', 'combined'] if pupil_tracker else ['split', 'eye', 'cheat', 'head', 'faces', 'combined']
             current_idx = modes.index(display_mode) if display_mode in modes else 0
@@ -536,13 +536,10 @@ def main():
     
     # Show pupil tracking statistics if enabled
     if pupil_tracker:
-        pupil_stats = pupil_tracker.get_statistics()
         print(f"- Pupil tracking summary:")
-        print(f"  - Total frames with pupil detection: {pupil_stats['total_tracked_frames']}")
-        print(f"  - Tracking accuracy: {pupil_stats['tracking_accuracy']:.2f}%")
-        print(f"  - Gaze direction distribution:")
-        for direction, percentage in pupil_stats['gaze_distribution'].items():
-            print(f"    - {direction}: {percentage:.2f}%")
+        print(f"  - Calibration status: {'Completed' if pupil_tracker.calibration_complete else 'Not completed'}")
+        if pupil_tracker.calibration_complete:
+            print(f"  - Number of calibration points: {len(pupil_tracker.center_points)}")
     
     # Show face detection statistics if enabled
     if face_detector:
