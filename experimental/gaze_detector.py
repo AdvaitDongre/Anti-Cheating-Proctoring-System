@@ -1,182 +1,141 @@
 import cv2
-import dlib
+import mediapipe as mp
 import numpy as np
-from imutils import face_utils
-from tensorflow.keras.models import load_model
-import winsound
 
-class GazeDetector:
-    def __init__(self):
-        self.IMG_SIZE = (64, 56)
-        self.B_SIZE = (34, 26)
-        self.margin = 95
-        self.class_labels = ['center', 'left', 'right']
-        
-        # Initialize face detector and shape predictor
-        self.detector = dlib.get_frontal_face_detector()
-        self.predictor = dlib.shape_predictor('../model/shape_predictor_68_face_landmarks.dat')
-        
-        self.font_letter = cv2.FONT_HERSHEY_PLAIN
-        
-        # Load models
-        self.model = load_model('../model/gazev3.1.h5')
-        self.model_b = load_model('../model/blinkdetection.h5')
-        
-        # Tracking variables
-        self.frames_to_blink = 6
-        self.blinking_frames = 0
+# Initialize MediaPipe Face Mesh
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5)
 
-    def detect_gaze(self, eye_img):
-        pred_l = self.model.predict(eye_img)
-        accuracy = int(np.array(pred_l).max() * 100)
-        gaze = self.class_labels[np.argmax(pred_l)]
-        return gaze
+def enhance_contrast(frame):
+    """Enhance image contrast using CLAHE for better performance in low light"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
 
-    def detect_blink(self, eye_img):
-        pred_B = self.model_b.predict(eye_img)
-        status = pred_B[0][0]
-        status = status * 100
-        status = round(status, 3)
-        return status
+def get_gaze_direction(frame, face_landmarks, frame_width, frame_height):
+    """Calculate gaze direction based on iris positions"""
+    # Iris landmarks (MediaPipe iris centers)
+    RIGHT_IRIS = [468]
+    LEFT_IRIS = [473]
+    
+    # Get eye contours
+    right_eye_contour = list(set([idx for connection in mp_face_mesh.FACEMESH_RIGHT_EYE for idx in connection]))
+    left_eye_contour = list(set([idx for connection in mp_face_mesh.FACEMESH_LEFT_EYE for idx in connection]))
 
-    def crop_eye(self, img, eye_points, gray):
-        x1, y1 = np.amin(eye_points, axis=0)
-        x2, y2 = np.amax(eye_points, axis=0)
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    # Process right eye
+    right_iris = face_landmarks.landmark[RIGHT_IRIS[0]]
+    right_iris_x = int(right_iris.x * frame_width)
+    right_iris_y = int(right_iris.y * frame_height)
+    
+    # Process left eye
+    left_iris = face_landmarks.landmark[LEFT_IRIS[0]]
+    left_iris_x = int(left_iris.x * frame_width)
+    left_iris_y = int(left_iris.y * frame_height)
 
-        w = (x2 - x1) * 1.2
-        h = w * self.IMG_SIZE[1] / self.IMG_SIZE[0]
+    # Calculate eye regions
+    def get_eye_region(contour_indices):
+        x_coords = [int(face_landmarks.landmark[i].x * frame_width) for i in contour_indices]
+        y_coords = [int(face_landmarks.landmark[i].y * frame_height) for i in contour_indices]
+        return (min(x_coords), max(x_coords), min(y_coords), max(y_coords))
 
-        margin_x, margin_y = w / 2, h / 2
+    # Get eye regions
+    r_min_x, r_max_x, r_min_y, r_max_y = get_eye_region(right_eye_contour)
+    l_min_x, l_max_x, l_min_y, l_max_y = get_eye_region(left_eye_contour)
 
-        min_x, min_y = int(cx - margin_x), int(cy - margin_y)
-        max_x, max_y = int(cx + margin_x), int(cy + margin_y)
+    # Calculate horizontal ratios
+    right_h_ratio = (right_iris_x - r_min_x) / (r_max_x - r_min_x) if (r_max_x - r_min_x) != 0 else 0.5
+    left_h_ratio = (left_iris_x - l_min_x) / (l_max_x - l_min_x) if (l_max_x - l_min_x) != 0 else 0.5
 
-        eye_rect = np.rint([min_x, min_y, max_x, max_y]).astype(np.int)
+    # Determine horizontal direction
+    h_direction = "center"
+    if right_h_ratio < 0.4 and left_h_ratio > 0.6:
+        h_direction = "right"
+    elif right_h_ratio > 0.6 and left_h_ratio < 0.4:
+        h_direction = "left"
 
-        eye_img = gray[eye_rect[1]:eye_rect[3], eye_rect[0]:eye_rect[2]]
+    # Calculate vertical ratios
+    right_v_ratio = (right_iris_y - r_min_y) / (r_max_y - r_min_y) if (r_max_y - r_min_y) != 0 else 0.5
+    left_v_ratio = (left_iris_y - l_min_y) / (l_max_y - l_min_y) if (l_max_y - l_min_y) != 0 else 0.5
 
-        return eye_img, eye_rect
+    # Determine vertical direction
+    v_direction = "center"
+    if right_v_ratio < 0.4 and left_v_ratio < 0.4:
+        v_direction = "up"
+    elif right_v_ratio > 0.6 and left_v_ratio > 0.6:
+        v_direction = "down"
 
-    def run_detection(self):
-        cap = cv2.VideoCapture(0)
-        
-        while cap.isOpened():
-            output = np.zeros((900, 820, 3), dtype="uint8")
-            ret, img = cap.read()
-            img = cv2.flip(img, flipCode=1)
-            h, w = (112, 128)
+    # Combine directions
+    directions = []
+    if h_direction != "center":
+        directions.append(h_direction)
+    if v_direction != "center":
+        directions.append(v_direction)
+    
+    return ' '.join(directions) if directions else "center", (right_iris_x, right_iris_y), (left_iris_x, left_iris_y)
+
+def process_frame(frame):
+    """Process each frame for gaze detection"""
+    frame = cv2.flip(frame, 1)  # Mirror frame
+    enhanced_frame = enhance_contrast(frame)
+    results = face_mesh.process(cv2.cvtColor(enhanced_frame, cv2.COLOR_BGR2RGB))
+    frame_height, frame_width = frame.shape[:2]
+
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            direction, right_pupil, left_pupil = get_gaze_direction(
+                frame, face_landmarks, frame_width, frame_height)
+
+            # Draw pupils
+            cv2.circle(frame, right_pupil, 3, (0, 0, 255), -1)
+            cv2.circle(frame, left_pupil, 3, (0, 0, 255), -1)
             
-            if not ret:
-                break
+            # Display direction
+            cv2.putText(frame, f"Direction: {direction}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, "Looking at screen" if direction == "center" else "Looking away!", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if direction != "center" else (0, 255, 0), 2)
 
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = self.detector(gray)
+    return frame
 
-            for face in faces:
-                shapes = self.predictor(gray, face)
+def gaze_detection(source=0):
+    """Main function for gaze detection"""
+    if isinstance(source, str):
+        if source.lower().endswith(('.png', '.jpg', '.jpeg')):
+            # Image processing
+            frame = cv2.imread(source)
+            if frame is not None:
+                processed = process_frame(frame)
+                cv2.imshow('Gaze Detection', processed)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
+            return
+        else:
+            # Video processing
+            cap = cv2.VideoCapture(source)
+    else:
+        # Webcam processing
+        cap = cv2.VideoCapture(source)
 
-                # Draw lines for left eye
-                for n in range(36, 42):
-                    x = shapes.part(n).x
-                    y = shapes.part(n).y
-                    next_point = n + 1
-                    if n == 41:
-                        next_point = 36
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
 
-                    x2 = shapes.part(next_point).x
-                    y2 = shapes.part(next_point).y
-                    cv2.line(img, (x, y), (x2, y2), (0, 69, 255), 2)
+        processed_frame = process_frame(frame)
+        cv2.imshow('Gaze Detection', processed_frame)
 
-                # Draw lines for right eye
-                for n in range(42, 48):
-                    x = shapes.part(n).x
-                    y = shapes.part(n).y
-                    next_point = n + 1
-                    if n == 47:
-                        next_point = 42
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-                    x2 = shapes.part(next_point).x
-                    y2 = shapes.part(next_point).y
-                    cv2.line(img, (x, y), (x2, y2), (153, 0, 153), 2)
-                
-                shapes = face_utils.shape_to_np(shapes)
-                
-                # Process left and right eye
-                eye_img_l, eye_rect_l = self.crop_eye(gray, eye_points=shapes[36:42], gray=gray)
-                eye_img_r, eye_rect_r = self.crop_eye(gray, eye_points=shapes[42:48], gray=gray)
-                
-                # Prepare eye images for display
-                eye_img_l_view = cv2.resize(eye_img_l, dsize=(128, 112))
-                eye_img_l_view = cv2.cvtColor(eye_img_l_view, cv2.COLOR_GRAY2RGB)
-                eye_img_r_view = cv2.resize(eye_img_r, dsize=(128, 112))
-                eye_img_r_view = cv2.cvtColor(eye_img_r_view, cv2.COLOR_GRAY2RGB)
-                
-                # Prepare images for blink detection
-                eye_blink_left = cv2.resize(eye_img_l.copy(), self.B_SIZE)
-                eye_blink_right = cv2.resize(eye_img_r.copy(), self.B_SIZE)
-                eye_blink_left_i = eye_blink_left.reshape((1, self.B_SIZE[1], self.B_SIZE[0], 1)).astype(np.float32) / 255.
-                eye_blink_right_i = eye_blink_right.reshape((1, self.B_SIZE[1], self.B_SIZE[0], 1)).astype(np.float32) / 255.
-                
-                # Prepare images for gaze detection
-                eye_img_l = cv2.resize(eye_img_l, dsize=self.IMG_SIZE)
-                eye_input_g = eye_img_l.copy().reshape((1, self.IMG_SIZE[1], self.IMG_SIZE[0], 1)).astype(np.float32) / 255.
-                
-                # Make predictions
-                status_l = self.detect_blink(eye_blink_left_i)
-                gaze = self.detect_gaze(eye_input_g)
-                
-                # Check for specific eye movements
-                if gaze == self.class_labels[1]:  # left
-                    self.blinking_frames += 1
-                    if self.blinking_frames == self.frames_to_blink:
-                        winsound.Beep(1000, 250)
-                elif gaze == self.class_labels[2]:  # right
-                    self.blinking_frames += 1
-                    if self.blinking_frames == self.frames_to_blink:
-                        winsound.Beep(1000, 250)
-                elif status_l < 0.1:  # blink
-                    self.blinking_frames += 1
-                    if self.blinking_frames == self.frames_to_blink:
-                        winsound.Beep(1000, 250)
-                else:
-                    self.blinking_frames = 0
-                
-                # Prepare final output display
-                output = cv2.line(output, (400, 200), (400, 0), (0, 255, 0), thickness=2)
-                cv2.putText(output, "LEFT EYE GAZE", (10, 180), self.font_letter, 1, (255, 255, 51), 1)
-                cv2.putText(output, "LEFT EYE OPENING %", (200, 180), self.font_letter, 1, (255, 255, 51), 1)
-                cv2.putText(output, "RIGHT EYE GAZE", (440, 180), self.font_letter, 1, (255, 255, 51), 1)
-                cv2.putText(output, "RIGHT EYE OPENING %", (621, 180), self.font_letter, 1, (255, 255, 51), 1)
-                
-                if status_l < 10:
-                    cv2.putText(output, "---BLINKING----", (250, 300), self.font_letter, 2, (153, 153, 255), 2)
-                
-                # Add eye images and labels to output
-                output[0:112, 0:128] = eye_img_l_view
-                cv2.putText(output, gaze, (30, 150), self.font_letter, 2, (0, 255, 0), 2)
-                
-                output[0:112, self.margin+w:(self.margin+w)+w] = eye_img_l_view
-                cv2.putText(output, (str(status_l)+"%"), ((self.margin+w), 150), self.font_letter, 2, (0, 0, 255), 2)
-                
-                output[0:112, 2*self.margin+2*w:(2*self.margin+2*w)+w] = eye_img_r_view
-                cv2.putText(output, gaze, ((2*self.margin+2*w)+30, 150), self.font_letter, 2, (0, 0, 255), 2)
-                
-                output[0:112, 3*self.margin+3*w:(3*self.margin+3*w)+w] = eye_img_r_view
-                cv2.putText(output, (str(status_l)+"%"), ((3*self.margin+3*w), 150), self.font_letter, 2, (0, 0, 255), 2)
-                
-                # Add the main camera view to the output
-                output[235+100:715+100, 80:720] = img
-                
-                cv2.imshow('result', output)
-                
-            if cv2.waitKey(1) == ord('q'):
-                break
-                
-        cap.release()
-        cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
 
-
-if __name__ == '__main__':
-    gaze = GazeDetector()
-    gaze.run_detection()
+if __name__ == "__main__":
+    # Use webcam (0) by default, or specify file path
+    gaze_detection(0)  # Replace 0 with "path/to/file" for image/video
