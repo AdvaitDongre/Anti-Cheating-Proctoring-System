@@ -1,0 +1,115 @@
+
+[2025-04-23 15:43:37] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - CodeSetup-stable-0.49.4.tmp (PID: 3888)
+   Path: C:\Users\Advait\AppData\Local\Temp\is-7NI3C.tmp\CodeSetup-stable-0.49.4.tmp
+   Reason: Running from temp location
+ - chrome.exe (PID: 13452)
+   Path: C:\Program Files\Google\Chrome\Application\chrome.exe
+   Reason: High resource usage
+ - CC40.exe (PID: 14448)
+   Path: C:\Program Files\WindowsApps\CLEVOCO.FnhotkeysandOSD_7.26.4.0_x64__6h6z29zh29qx0\FnKey\CC40\CC40.exe
+   Reason: High resource usage
+ - CodeSetup-stable-0.49.4.exe (PID: 17020)
+   Path: C:\Users\Advait\AppData\Local\Temp\vscode-stable-user-x64-4cdiupgargu\CodeSetup-stable-0.49.4.exe
+   Reason: Running from temp location
+
+[2025-04-23 16:01:04] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - CodeSetup-stable-0.49.4.tmp (PID: 3888)
+   Path: C:\Users\Advait\AppData\Local\Temp\is-7NI3C.tmp\CodeSetup-stable-0.49.4.tmp
+   Reason: Running from temp location
+ - python.exe (PID: 4872)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
+ - Cursor.exe (PID: 9300)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+ - CC40.exe (PID: 14448)
+   Path: C:\Program Files\WindowsApps\CLEVOCO.FnhotkeysandOSD_7.26.4.0_x64__6h6z29zh29qx0\FnKey\CC40\CC40.exe
+   Reason: High resource usage
+ - CodeSetup-stable-0.49.4.exe (PID: 17020)
+   Path: C:\Users\Advait\AppData\Local\Temp\vscode-stable-user-x64-4cdiupgargu\CodeSetup-stable-0.49.4.exe
+   Reason: Running from temp location
+
+[2025-04-23 16:45:04] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - python.exe (PID: 768)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
+ - MsMpEng.exe (PID: 4904)
+   Path: C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.25030.2-0\MsMpEng.exe
+   Reason: High resource usage
+ - Cursor.exe (PID: 15628)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+
+[2025-04-23 16:50:04] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - chrome.exe (PID: 14460)
+   Path: C:\Program Files\Google\Chrome\Application\chrome.exe
+   Reason: High resource usage
+ - Cursor.exe (PID: 15628)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+ - python.exe (PID: 16432)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
+
+[2025-04-23 16:50:25] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - chrome.exe (PID: 14460)
+   Path: C:\Program Files\Google\Chrome\Application\chrome.exe
+   Reason: High resource usage
+ - Cursor.exe (PID: 15628)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+ - python.exe (PID: 16432)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
+
+[2025-04-23 16:50:47] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - chrome.exe (PID: 14460)
+   Path: C:\Program Files\Google\Chrome\Application\chrome.exe
+   Reason: High resource usage
+ - Cursor.exe (PID: 15628)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+ - python.exe (PID: 16432)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
+
+[2025-04-23 16:55:05] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - Cursor.exe (PID: 15628)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+ - python.exe (PID: 16708)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
+
+[2025-04-23 16:55:47] SUSPICIOUS PROCESSES DETECTED:
+ - System Idle Process (PID: 0)
+   Path: None
+   Reason: High resource usage
+ - Cursor.exe (PID: 15628)
+   Path: C:\Users\Advait\AppData\Local\Programs\cursor\Cursor.exe
+   Reason: High resource usage
+ - python.exe (PID: 16224)
+   Path: C:\Users\Advait\AppData\Local\Programs\Python\Python311\python.exe
+   Reason: High resource usage
