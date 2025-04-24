@@ -3,7 +3,12 @@ import dlib
 import imutils 
 from scipy.spatial import distance as dist 
 from imutils import face_utils 
-
+def calculate_EAR(eye): 
+        y1 = dist.euclidean(eye[1], eye[5]) 
+        y2 = dist.euclidean(eye[2], eye[4]) 
+        x1 = dist.euclidean(eye[0], eye[3]) 
+        EAR = (y1+y2) / x1 
+        return EAR 
 def blink_detection(input_source='webcam'):
     """
     Perform blink detection on the specified input source.
@@ -11,12 +16,6 @@ def blink_detection(input_source='webcam'):
     Parameters:
     input_source (str or path): Can be 'webcam', a video file path, or an image file path
     """
-    def calculate_EAR(eye): 
-        y1 = dist.euclidean(eye[1], eye[5]) 
-        y2 = dist.euclidean(eye[2], eye[4]) 
-        x1 = dist.euclidean(eye[0], eye[3]) 
-        EAR = (y1+y2) / x1 
-        return EAR 
 
     blink_thresh = 0.45
     succ_frame = 2

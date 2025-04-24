@@ -1,329 +1,274 @@
 import cv2
-import numpy as np
-import threading
+import json
 import time
-import argparse
-from queue import Queue
-from collections import deque
-
-# Import all our detection modules
+from datetime import datetime
+from collections import defaultdict
+import threading
+import numpy as np
 from detect_blinks import blink_detection
 from gaze_detector import gaze_detection
+from head_posture import head_posture_detection
 from lip_movement import LipMovementDetector
+from tile import check_user_position, detector as tile_detector
 from yolo_detecting_multiple_classes import YOLOv12ExamCheatingDetector
 from process_monitor import AdvancedProcessMonitor
 from speach_detector import GeminiSpeakerDetector
 from sitelocker import FullSiteLocker
+import dlib
+import os
 
-class CheatingDetectionSystem:
-    def __init__(self, input_source='webcam', show_all=True, enable_site_lock=False, allowed_url=None):
-        """
-        Initialize the cheating detection system with all modules.
-        
-        Args:
-            input_source (str): 'webcam' or path to video/image file
-            show_all (bool): Whether to show all detection outputs
-            enable_site_lock (bool): Whether to enable website locking
-            allowed_url (str): URL to lock to if site locking is enabled
-        """
-        self.input_source = input_source
-        self.show_all = show_all
-        self.running = False
-        
-        # Initialize detection modules
-        self.lip_detector = LipMovementDetector()
-        self.yolo_detector = YOLOv12ExamCheatingDetector()
-        self.process_monitor = AdvancedProcessMonitor()
-        self.speaker_detector = GeminiSpeakerDetector(api_key="your-api-key") if hasattr(self, 'GeminiSpeakerDetector') else None
-        
-        # Site locker if enabled
-        self.site_locker = None
-        if enable_site_lock and allowed_url:
-            self.site_locker = FullSiteLocker(allowed_url=allowed_url, test_duration=3600)  # 1 hour duration
-            
-        # Queues for inter-thread communication
-        self.frame_queue = Queue(maxsize=1)
-        self.output_frame_queue = Queue(maxsize=1)
-        
-        # Detection states
-        self.detection_states = {
-            'blink': {'count': 0, 'state': 'Open'},
-            'gaze': {'direction': 'center', 'looking_at_screen': True},
-            'lips': {'movement': False, 'open': False, 'openness': 0},
-            'objects': {'counts': {}, 'warnings': []},
-            'audio': {'speakers': 1, 'alert': False}
-        }
-        
-        # Display parameters
-        self.display_width = 1280
-        self.display_height = 720
-        self.font = cv2.FONT_HERSHEY_SIMPLEX
-        self.font_scale = 0.6
-        self.font_thickness = 1
-        self.text_color = (255, 255, 255)
-        self.alert_color = (0, 0, 255)
-        
-    def start(self):
-        """Start all detection modules."""
+class ExamMonitoringSystem:
+    def __init__(self):
+        # Initialize all detectors
+        self.blink_data = []
+        self.gaze_data = []
+        self.head_posture_data = []
+        self.lip_movement_data = []
+        self.tile_violations = 0
+        self.yolo_detections = []
+        self.process_monitor_data = []
+        self.speaker_detections = []
+        self.start_time = time.time()
         self.running = True
         
+        # Initialize detectors
+        self.blink_detector = blink_detection
+        self.gaze_detector = gaze_detection
+        self.head_posture_detector = head_posture_detection
+        self.lip_detector = LipMovementDetector()
+        
+        # Initialize YOLO detector with proper model path
+        model_path = '../model/yolo12n.pt'
+        if os.path.exists(model_path):
+            self.yolo_detector = YOLOv12ExamCheatingDetector(model_path=model_path)
+        else:
+            print(f"Warning: YOLO model not found at {model_path}. YOLO detection disabled.")
+            self.yolo_detector = None
+        
+        # Initialize process monitor
+        self.process_monitor = AdvancedProcessMonitor()
+        
+        # Initialize speaker detector and site locker
+        self.speaker_detector = None  # Will be initialized if needed
+        self.site_locker = None  # Will be initialized if needed
+        
+        # Initialize webcam
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            raise RuntimeError("Could not open webcam")
+            
+        # For tile detection
+        self.tile_detector = dlib.get_frontal_face_detector()
+        
+        # Start monitoring threads
+        self.start_monitoring_threads()
+        
+    def start_monitoring_threads(self):
         # Start process monitoring in a separate thread
-        process_thread = threading.Thread(target=self._run_process_monitor)
-        process_thread.daemon = True
-        process_thread.start()
+        self.process_thread = threading.Thread(target=self.monitor_processes)
+        self.process_thread.daemon = True
+        self.process_thread.start()
         
-        # Start audio detection if available
-        if self.speaker_detector:
-            audio_thread = threading.Thread(target=self._run_audio_detection)
-            audio_thread.daemon = True
-            audio_thread.start()
+        # Start speaker detection if needed
+        if os.getenv("GEMINI_API_KEY"):
+            self.speaker_detector = GeminiSpeakerDetector(api_key=os.getenv("GEMINI_API_KEY"))
+            self.speaker_thread = threading.Thread(target=self.monitor_speakers)
+            self.speaker_thread.daemon = True
+            self.speaker_thread.start()
         
-        # Start site locker if enabled
-        if self.site_locker:
-            self.site_locker.start()
-        
-        # Start video processing
-        self._run_video_processing()
-        
-    def stop(self):
-        """Stop all detection modules."""
-        self.running = False
-        if self.site_locker:
-            self.site_locker.stop()
-        
-    def _run_process_monitor(self):
-        """Run the process monitor in a background thread."""
+    def monitor_processes(self):
         while self.running:
             suspicious = self.process_monitor.scan_processes()
             if suspicious:
-                print(f"[PROCESS MONITOR] Found {len(suspicious)} suspicious processes")
-            time.sleep(30)  # Check every 30 seconds
-    
-    def _run_audio_detection(self):
-        """Run the audio detection in a background thread."""
+                timestamp = time.time() - self.start_time
+                self.process_monitor_data.append({
+                    "timestamp": timestamp,
+                    "processes": suspicious
+                })
+            time.sleep(5)  # Check every 5 seconds
+            
+    def monitor_speakers(self):
         if self.speaker_detector:
             self.speaker_detector.start()
-            while self.running:
-                # Audio detection runs in its own thread, we just monitor here
-                time.sleep(1)
-    
-    def _run_video_processing(self):
-        """Main video processing loop with all detections."""
-        # Initialize video capture
-        if self.input_source == 'webcam':
-            cap = cv2.VideoCapture(0)
-        else:
-            cap = cv2.VideoCapture(self.input_source)
             
-        if not cap.isOpened():
-            print("Error: Could not open video source")
-            return
+    def process_frame(self, frame):
+        timestamp = time.time() - self.start_time
+        
+        # Blink detection
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = dlib.get_frontal_face_detector()(gray)
+        
+        if faces:
+            # Get the largest face
+            face = max(faces, key=lambda rect: rect.width() * rect.height())
+            shape = dlib.shape_predictor('../model/shape_predictor_68_face_landmarks.dat')(gray, face)
+            shape = np.array([[p.x, p.y] for p in shape.parts()])
             
-        # Set up display window
-        cv2.namedWindow("Cheating Detection System", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Cheating Detection System", self.display_width, self.display_height)
-        
-        # Variables for blink detection (from detect_blinks.py)
-        blink_thresh = 0.45
-        succ_frame = 2
-        count_frame = 0
-        total_blinks = 0
-        blink_state = False
-        
-        # Variables for gaze detection (from gaze_detector.py)
-        mp_face_mesh = mp.solutions.face_mesh
-        face_mesh = mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5)
-        
+            # Blink detection
+            left_eye = shape[36:42]
+            right_eye = shape[42:48]
+            left_ear = (np.linalg.norm(left_eye[1] - left_eye[5]) + np.linalg.norm(left_eye[2] - left_eye[4])) / (2 * np.linalg.norm(left_eye[0] - left_eye[3]))
+            right_ear = (np.linalg.norm(right_eye[1] - right_eye[5]) + np.linalg.norm(right_eye[2] - right_eye[4])) / (2 * np.linalg.norm(right_eye[0] - right_eye[3]))
+            avg_ear = (left_ear + right_ear) / 2
+            is_blinking = avg_ear < 0.45
+            self.blink_data.append({
+                "timestamp": timestamp,
+                "is_blinking": is_blinking,
+                "ear": avg_ear
+            })
+            
+            # Gaze detection
+            gaze_direction = "center"
+            try:
+                # Simplified gaze detection
+                left_eye_center = np.mean(left_eye, axis=0)
+                right_eye_center = np.mean(right_eye, axis=0)
+                
+                # Determine gaze direction based on eye positions
+                if left_eye_center[0] < right_eye_center[0] - 10:
+                    gaze_direction = "left"
+                elif left_eye_center[0] > right_eye_center[0] + 10:
+                    gaze_direction = "right"
+                elif left_eye_center[1] < right_eye_center[1] - 5:
+                    gaze_direction = "up"
+                elif left_eye_center[1] > right_eye_center[1] + 5:
+                    gaze_direction = "down"
+            except:
+                pass
+                
+            self.gaze_data.append({
+                "timestamp": timestamp,
+                "direction": gaze_direction
+            })
+            
+            # Head posture detection
+            vertical_angle = 0
+            horizontal_angle = 0
+            try:
+                # Simplified head posture detection
+                nose_tip = shape[30]
+                chin = shape[8]
+                left_side = shape[0]
+                right_side = shape[16]
+                
+                # Calculate vertical angle
+                vertical_vec = nose_tip - chin
+                vertical_angle = np.degrees(np.arctan2(vertical_vec[1], vertical_vec[0])) - 90
+                
+                # Calculate horizontal angle
+                horizontal_vec = right_side - left_side
+                horizontal_angle = np.degrees(np.arctan2(horizontal_vec[1], horizontal_vec[0]))
+            except:
+                pass
+                
+            self.head_posture_data.append({
+                "timestamp": timestamp,
+                "vertical_angle": vertical_angle,
+                "horizontal_angle": horizontal_angle
+            })
+            
+            # Lip movement detection
+            lip_movement, mouth_opened, openness = self.lip_detector._detect_movement(0)  # Simplified
+            self.lip_movement_data.append({
+                "timestamp": timestamp,
+                "is_moving": lip_movement,
+                "mouth_opened": mouth_opened,
+                "openness": openness
+            })
+            
+            # Tile detection
+            padding = 10
+            x, y = face.left() - padding, face.top() - padding
+            w, h = face.width() + 2*padding, face.height() + 2*padding
+            
+            # Check if face is outside the tile (150, 80, 500, 420)
+            is_outside = (x < 150 or y < 80 or (x + w) > 500 or (y + h) > 420)
+            if is_outside:
+                self.tile_violations += 1
+                
+        # YOLO object detection
+        try:
+            if self.yolo_detector:
+                results = self.yolo_detector.model.predict(
+                    source=frame,
+                    conf=0.5,
+                    iou=0.5,
+                    verbose=False
+                )
+                
+                detections = []
+                for detection in results[0].boxes:
+                    cls = int(detection.cls)
+                    conf = float(detection.conf)
+                    box = detection.xyxy[0].tolist()
+                    detections.append({
+                        "class_id": cls,
+                        "confidence": conf,
+                        "box": box
+                    })
+                    
+                self.yolo_detections.append({
+                    "timestamp": timestamp,
+                    "detections": detections
+                })
+        except Exception as e:
+            print(f"Error in YOLO detection: {e}")
+            # Add empty detection for this timestamp to maintain data consistency
+            self.yolo_detections.append({
+                "timestamp": timestamp,
+                "detections": []
+            })
+            
+    def run(self):
         try:
             while self.running:
-                ret, frame = cap.read()
+                ret, frame = self.cap.read()
                 if not ret:
                     break
                     
-                # Mirror frame if webcam
-                if self.input_source == 'webcam':
-                    frame = cv2.flip(frame, 1)
+                # Process frame in the background
+                self.process_frame(frame)
                 
-                # Resize for processing
-                frame = cv2.resize(frame, (640, 480))
-                display_frame = frame.copy()
-                
-                # Convert to RGB for some detectors
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # ----------------------------
-                # Run all detections
-                # ----------------------------
-                
-                # 1. Blink detection (using dlib)
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = detector(gray)
-                for face in faces:
-                    shape = landmark_predict(gray, face)
-                    shape = face_utils.shape_to_np(shape)
-                    
-                    lefteye = shape[L_start: L_end]
-                    righteye = shape[R_start:R_end]
-                    
-                    left_EAR = calculate_EAR(lefteye)
-                    right_EAR = calculate_EAR(righteye)
-                    avg = (left_EAR + right_EAR) / 2
-                    
-                    if avg < blink_thresh:
-                        count_frame += 1
-                    else:
-                        if count_frame >= succ_frame and not blink_state:
-                            total_blinks += 1
-                            blink_state = True
-                        count_frame = 0
-                        blink_state = False
-                    
-                    self.detection_states['blink']['count'] = total_blinks
-                    self.detection_states['blink']['state'] = 'Closed' if avg < blink_thresh else 'Open'
-                
-                # 2. Gaze detection (using mediapipe)
-                results = face_mesh.process(rgb_frame)
-                if results.multi_face_landmarks:
-                    for face_landmarks in results.multi_face_landmarks:
-                        direction, right_pupil, left_pupil = get_gaze_direction(
-                            frame, face_landmarks, frame.shape[1], frame.shape[0])
-                        
-                        self.detection_states['gaze']['direction'] = direction
-                        self.detection_states['gaze']['looking_at_screen'] = direction == "center"
-                        
-                        # Draw gaze direction on frame
-                        cv2.circle(display_frame, right_pupil, 3, (0, 0, 255), -1)
-                        cv2.circle(display_frame, left_pupil, 3, (0, 0, 255), -1)
-                
-                # 3. Lip movement detection
-                movement_detected, mouth_opened, openness, _ = self.lip_detector.process_frame(frame)
-                self.detection_states['lips']['movement'] = movement_detected
-                self.detection_states['lips']['open'] = mouth_opened
-                self.detection_states['lips']['openness'] = openness
-                
-                # 4. Object detection (YOLO)
-                annotated_frame, counts = self.yolo_detector.detect(frame)
-                self.detection_states['objects']['counts'] = counts
-                
-                # Combine all detections into a single display frame
-                self._update_display_frame(display_frame)
-                
-                # Show the combined frame
-                cv2.imshow("Cheating Detection System", display_frame)
-                
-                # Exit on 'q' key
+                # Check for quit command
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
                     
         finally:
-            cap.release()
-            cv2.destroyAllWindows()
-            self.stop()
-    
-    def _update_display_frame(self, frame):
-        """Update the display frame with all detection information."""
-        # Create a black sidebar for status information
-        sidebar = np.zeros((frame.shape[0], 300, 3), dtype=np.uint8)
+            self.cleanup()
+            
+    def cleanup(self):
+        self.running = False
+        self.cap.release()
+        cv2.destroyAllWindows()
         
-        # Add detection information to the sidebar
-        y_offset = 30
-        line_height = 30
-        
-        # Blink information
-        blink_text = f"Blinks: {self.detection_states['blink']['count']}"
-        state_text = f"Eyes: {self.detection_states['blink']['state']}"
-        cv2.putText(sidebar, blink_text, (10, y_offset), self.font, self.font_scale, self.text_color, self.font_thickness)
-        cv2.putText(sidebar, state_text, (10, y_offset + line_height), self.font, self.font_scale, 
-                    (0, 0, 255) if self.detection_states['blink']['state'] == 'Closed' else (0, 255, 0), self.font_thickness)
-        y_offset += line_height * 2
-        
-        # Gaze information
-        gaze_text = f"Gaze: {self.detection_states['gaze']['direction']}"
-        screen_text = "Looking at screen" if self.detection_states['gaze']['looking_at_screen'] else "Looking away!"
-        cv2.putText(sidebar, gaze_text, (10, y_offset), self.font, self.font_scale, self.text_color, self.font_thickness)
-        cv2.putText(sidebar, screen_text, (10, y_offset + line_height), self.font, self.font_scale, 
-                    (0, 255, 0) if self.detection_states['gaze']['looking_at_screen'] else (0, 0, 255), self.font_thickness)
-        y_offset += line_height * 2
-        
-        # Lip movement information
-        lip_state = "OPEN" if self.detection_states['lips']['open'] else "MOVING" if self.detection_states['lips']['movement'] else "still"
-        lip_color = (0, 255, 255) if self.detection_states['lips']['open'] else (0, 255, 0) if self.detection_states['lips']['movement'] else (0, 0, 255)
-        lip_text = f"Lips: {lip_state}"
-        openness_text = f"Openness: {self.detection_states['lips']['openness']:.2f}"
-        cv2.putText(sidebar, lip_text, (10, y_offset), self.font, self.font_scale, lip_color, self.font_thickness)
-        cv2.putText(sidebar, openness_text, (10, y_offset + line_height), self.font, self.font_scale * 0.8, self.text_color, self.font_thickness)
-        y_offset += line_height * 2
-        
-        # Object detection information
-        cv2.putText(sidebar, "Detected Objects:", (10, y_offset), self.font, self.font_scale, self.text_color, self.font_thickness)
-        y_offset += line_height
-        
-        for obj, count in self.detection_states['objects']['counts'].items():
-            if count > 0:
-                obj_text = f"- {obj}: {count}"
-                cv2.putText(sidebar, obj_text, (20, y_offset), self.font, self.font_scale * 0.8, 
-                           (0, 0, 255) if obj in ['cell phone', 'laptop'] else self.text_color, self.font_thickness)
-                y_offset += line_height
-        
-        # Audio detection information if available
         if self.speaker_detector:
-            audio_text = f"Speakers: {self.detection_states['audio']['speakers']}"
-            cv2.putText(sidebar, audio_text, (10, y_offset), self.font, self.font_scale, 
-                       (0, 0, 255) if self.detection_states['audio']['speakers'] > 1 else (0, 255, 0), self.font_thickness)
-            y_offset += line_height
+            self.speaker_detector.stop()
+            
+        # Save all data to JSON
+        self.save_results()
         
-        # Combine sidebar with main frame
-        combined_frame = np.hstack((frame, sidebar))
+    def save_results(self):
+        results = {
+            "metadata": {
+                "start_time": datetime.fromtimestamp(self.start_time).isoformat(),
+                "duration": time.time() - self.start_time,
+                "system": "Exam Monitoring System"
+            },
+            "blink_data": self.blink_data,
+            "gaze_data": self.gaze_data,
+            "head_posture_data": self.head_posture_data,
+            "lip_movement_data": self.lip_movement_data,
+            "tile_violations": self.tile_violations,
+            "yolo_detections": self.yolo_detections,
+            "process_monitor_data": self.process_monitor_data,
+            "speaker_detections": self.speaker_detections if hasattr(self, 'speaker_detections') else []
+        }
         
-        # Add warnings at the bottom of the frame
-        warning_y = frame.shape[0] - 30
-        if not self.detection_states['gaze']['looking_at_screen']:
-            cv2.putText(combined_frame, "WARNING: Not looking at screen!", (10, warning_y), 
-                        self.font, 0.7, self.alert_color, 2)
-            warning_y -= 30
-        
-        if self.detection_states['lips']['open']:
-            cv2.putText(combined_frame, "WARNING: Mouth open detected!", (10, warning_y), 
-                        self.font, 0.7, self.alert_color, 2)
-            warning_y -= 30
-        
-        if 'cell phone' in self.detection_states['objects']['counts'] and self.detection_states['objects']['counts']['cell phone'] > 0:
-            cv2.putText(combined_frame, "WARNING: Cell phone detected!", (10, warning_y), 
-                        self.font, 0.7, self.alert_color, 2)
-            warning_y -= 30
-        
-        if self.detection_states['audio']['alert']:
-            cv2.putText(combined_frame, "WARNING: Multiple speakers detected!", (10, warning_y), 
-                        self.font, 0.7, self.alert_color, 2)
-            warning_y -= 30
-        
-        return combined_frame
-
-def main():
-    parser = argparse.ArgumentParser(description="Comprehensive Cheating Detection System")
-    parser.add_argument('--input', type=str, default='webcam', help="Input source: 'webcam' or path to video/image file")
-    parser.add_argument('--site-lock', action='store_true', help="Enable website locking")
-    parser.add_argument('--allowed-url', type=str, help="URL to lock to if site locking is enabled")
-    
-    args = parser.parse_args()
-    
-    # Initialize and start the system
-    system = CheatingDetectionSystem(
-        input_source=args.input,
-        enable_site_lock=args.site_lock,
-        allowed_url=args.allowed_url
-    )
-    
-    try:
-        system.start()
-    except KeyboardInterrupt:
-        system.stop()
-        print("System stopped by user")
+        with open("exam_monitoring_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+            
+        print("Results saved to exam_monitoring_results.json")
 
 if __name__ == "__main__":
-    main()
+    monitor = ExamMonitoringSystem()
+    monitor.run()

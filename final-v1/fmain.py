@@ -7,6 +7,7 @@ import json
 import threading
 import datetime
 import dlib
+import queue
 from collections import deque
 from dotenv import load_dotenv
 
@@ -27,7 +28,7 @@ class ExamMonitor:
         self.start_time = time.time()
         self.session_start = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Initialize mediapipe face mesh
+        # Initialize mediapipe face mesh with optimized settings
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             static_image_mode=False,
@@ -136,6 +137,14 @@ class ExamMonitor:
         self.vertical_angle_history = deque(maxlen=self.angle_history_size)
         self.horizontal_angle_history = deque(maxlen=self.angle_history_size)
         
+        # Performance optimization
+        self.frame_queue = queue.Queue(maxsize=10)
+        self.yolo_queue = queue.Queue(maxsize=5)
+        self.stop_threads = False
+        self.processing_thread = None
+        self.yolo_thread = None
+        self.skip_frames = 0  # Don't skip frames by default
+        
     def smooth_angles(self, v_angle, h_angle):
         """Apply smoothing to reduce jitter in angle measurements"""
         self.vertical_angle_history.append(v_angle)
@@ -236,7 +245,9 @@ class ExamMonitor:
     def check_face_in_tile(self, frame, face_rect):
         """Check if face is inside the defined tile area"""
         if face_rect:
-            x, y, w, h = face_rect.left(), face_rect.top(), face_rect.width(), face_rect.height()
+            # Direct attribute access is faster than method calls
+            x, y = face_rect.left(), face_rect.top()
+            w, h = face_rect.width(), face_rect.height()
             
             # Add padding
             padding = 10
@@ -263,28 +274,28 @@ class ExamMonitor:
         return False
     
     def detect_blinks(self, landmarks, frame_width, frame_height):
-        """Detect blinks using facial landmarks"""
+        """Detect blinks using facial landmarks (optimized version)"""
         # Extract left and right eye landmarks
         # Left eye indices (based on mediapipe)
         left_eye_indices = [33, 133, 160, 159, 158, 144, 145, 153]
         # Right eye indices
         right_eye_indices = [362, 263, 387, 386, 385, 373, 374, 380]
         
-        # Get left and right eye landmarks
-        left_eye = []
-        right_eye = []
+        # Pre-allocate arrays for better performance
+        left_eye = np.zeros((len(left_eye_indices), 2), dtype=np.int32)
+        right_eye = np.zeros((len(right_eye_indices), 2), dtype=np.int32)
         
-        for idx in left_eye_indices:
+        # Get left eye landmarks
+        for i, idx in enumerate(left_eye_indices):
             landmark = landmarks[idx]
-            x = int(landmark.x * frame_width)
-            y = int(landmark.y * frame_height)
-            left_eye.append((x, y))
+            left_eye[i, 0] = int(landmark.x * frame_width)
+            left_eye[i, 1] = int(landmark.y * frame_height)
             
-        for idx in right_eye_indices:
+        # Get right eye landmarks
+        for i, idx in enumerate(right_eye_indices):
             landmark = landmarks[idx]
-            x = int(landmark.x * frame_width)
-            y = int(landmark.y * frame_height)
-            right_eye.append((x, y))
+            right_eye[i, 0] = int(landmark.x * frame_width)
+            right_eye[i, 1] = int(landmark.y * frame_height)
         
         # Calculate EAR for both eyes
         left_EAR = calculate_EAR(left_eye)
@@ -336,6 +347,142 @@ class ExamMonitor:
                 print(f"Error in YOLO detection: {e}")
         return {}
     
+    def process_frame_in_thread(self):
+        """Process frames from the queue to offload work from the main thread"""
+        while not self.stop_threads:
+            try:
+                data = self.frame_queue.get(timeout=0.5)
+                if data is None:
+                    break
+                
+                frame, frame_height, frame_width, gray_frame = data
+                
+                # Process with MediaPipe Face Mesh
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.face_mesh.process(rgb_frame)
+                
+                # Detect faces with dlib for tile check
+                faces = self.face_detector(gray_frame)
+                
+                # Initialize face detection flag
+                face_detected = False
+                
+                # Check if face is in tile
+                face_in_tile = False
+                if faces:
+                    largest_face = max(faces, key=lambda rect: rect.width() * rect.height())
+                    face_in_tile = self.check_face_in_tile(frame, largest_face)
+                
+                if results.multi_face_landmarks:
+                    face_detected = True
+                    for face_landmarks in results.multi_face_landmarks:
+                        # Detect blinks
+                        is_blinking = self.detect_blinks(face_landmarks.landmark, frame_width, frame_height)
+                        
+                        # Head posture detection
+                        vertical_angle, horizontal_angle, _ = calculate_head_pose(frame, face_landmarks.landmark)
+                        smoothed_v, smoothed_h = self.smooth_angles(vertical_angle, horizontal_angle)
+                        
+                        # Determine if head position is abnormal
+                        is_head_misaligned = abs(smoothed_v) > self.posture_threshold or abs(smoothed_h) > self.posture_threshold
+                        
+                        # Track head misalignment
+                        if is_head_misaligned and not self.is_out_of_position:
+                            self.is_out_of_position = True
+                            self.out_of_position_start = time.time()
+                            self.out_of_position_count += 1
+                        elif not is_head_misaligned and self.is_out_of_position:
+                            self.is_out_of_position = False
+                            duration = time.time() - self.out_of_position_start
+                            self.out_of_position_duration += duration
+                            self.posture_changes.append({
+                                "start": self.out_of_position_start,
+                                "end": time.time(),
+                                "duration": duration,
+                                "v_angle": smoothed_v,
+                                "h_angle": smoothed_h
+                            })
+                        
+                        # Gaze detection
+                        direction, _, _ = get_gaze_direction(frame, face_landmarks, frame_width, frame_height)
+                        is_looking_away = direction != "center"
+                        
+                        # Track looking away
+                        if is_looking_away and not self.is_looking_away:
+                            self.is_looking_away = True
+                            self.looking_away_start = time.time()
+                            self.looking_away_count += 1
+                        elif not is_looking_away and self.is_looking_away:
+                            self.is_looking_away = False
+                            duration = time.time() - self.looking_away_start
+                            self.looking_away_duration += duration
+                            self.direction_changes.append({
+                                "start": self.looking_away_start,
+                                "end": time.time(),
+                                "duration": duration,
+                                "direction": direction
+                            })
+                        
+                        # Lip movement detection
+                        is_mouth_moving, is_mouth_open, openness, _ = self.lip_detector.process_frame(frame)
+                        
+                        # Track lip movement
+                        if (is_mouth_moving or is_mouth_open) and not self.is_talking:
+                            self.is_talking = True
+                            self.talking_start = time.time()
+                            self.talking_count += 1
+                        elif not (is_mouth_moving or is_mouth_open) and self.is_talking:
+                            self.is_talking = False
+                            duration = time.time() - self.talking_start
+                            self.talking_duration += duration
+                            self.mouth_open_events.append({
+                                "start": self.talking_start,
+                                "end": time.time(),
+                                "duration": duration,
+                                "openness": openness
+                            })
+                
+                else:
+                    # Face is not in frame
+                    if not self.is_out_of_bounds:
+                        self.is_out_of_bounds = True
+                        self.out_of_bounds_start = time.time()
+                        self.out_of_bounds_count += 1
+                
+                # If face is back in frame after being out
+                if face_detected and self.is_out_of_bounds:
+                    self.is_out_of_bounds = False
+                    duration = time.time() - self.out_of_bounds_start
+                    self.out_of_bounds_duration += duration
+                    self.position_violations.append({
+                        "start": self.out_of_bounds_start,
+                        "end": time.time(),
+                        "duration": duration
+                    })
+                
+                self.frame_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in processing thread: {e}")
+    
+    def process_yolo_in_thread(self):
+        """Process YOLO detection in a separate thread"""
+        while not self.stop_threads:
+            try:
+                frame = self.yolo_queue.get(timeout=0.5)
+                if frame is None:
+                    break
+                
+                # Run YOLO detection
+                self.detect_objects_with_yolo(frame)
+                
+                self.yolo_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in YOLO thread: {e}")
+
     def start_monitoring(self):
         """Start all monitoring threads"""
         # Start process monitoring
@@ -351,147 +498,105 @@ class ExamMonitor:
         if self.speech_detector:
             self.start_speech_detection()
         
+        # Start frame processing thread
+        self.processing_thread = threading.Thread(target=self.process_frame_in_thread)
+        self.processing_thread.daemon = True
+        self.processing_thread.start()
+        
+        # Start YOLO processing thread if available
+        if self.yolo_detector:
+            self.yolo_thread = threading.Thread(target=self.process_yolo_in_thread)
+            self.yolo_thread.daemon = True
+            self.yolo_thread.start()
+    
     def run(self):
         """Main monitoring function"""
-        cap = cv2.VideoCapture(0)
+        # Open camera with improved settings
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # Use DirectShow API on Windows for better performance
         
         # Set camera properties
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         
+        # Set camera buffer size (smaller buffer = more current frames)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
         # Start all monitoring threads
         self.start_monitoring()
         
+        frame_count = 0
+        start_fps_time = time.time()
+        fps = 0
+        
+        # Pre-allocate frame buffer for better performance
+        frame_buffer = None
+        
+        # Optimize processing by letting threads do most of the work
         while cap.isOpened():
             success, frame = cap.read()
             if not success:
                 print("Failed to capture video")
-                break
+                time.sleep(0.01)  # Short sleep to prevent CPU spiking on failure
+                continue
+                
+            # Calculate FPS every 30 frames
+            frame_count += 1
+            if frame_count % 30 == 0:
+                end_time = time.time()
+                fps = 30 / (end_time - start_fps_time)
+                start_fps_time = end_time
             
             # Flip frame for mirror view
             frame = cv2.flip(frame, 1)
             
-            # Create a clean copy for YOLO detection
-            frame_for_yolo = frame.copy()
-            
-            # Convert to RGB for processing
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame_height, frame_width = frame.shape[:2]
+            # Create a clean copy for YOLO detection (periodically)
+            # Only run YOLO every 15 frames to reduce load
+            if frame_count % 15 == 0 and self.yolo_detector and not self.yolo_queue.full():
+                try:
+                    self.yolo_queue.put(frame.copy(), block=False)
+                except:
+                    pass  # Skip if queue is full
             
             # Convert to grayscale for dlib face detection
+            # Will be cheaper to do this here once rather than in multiple places
             gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             
-            # Process with MediaPipe Face Mesh
-            results = self.face_mesh.process(rgb_frame)
-            
-            # Detect faces with dlib for tile check
-            faces = self.face_detector(gray_frame)
-            
-            # Initialize face detection flag
-            face_detected = False
-            
-            # Check if face is in tile
-            face_in_tile = False
-            if faces:
-                largest_face = max(faces, key=lambda rect: rect.width() * rect.height())
-                face_in_tile = self.check_face_in_tile(frame, largest_face)
-            
-            # Process YOLO detection in background
-            self.detect_objects_with_yolo(frame_for_yolo)
-            
-            if results.multi_face_landmarks:
-                face_detected = True
-                for face_landmarks in results.multi_face_landmarks:
-                    # Detect blinks
-                    is_blinking = self.detect_blinks(face_landmarks.landmark, frame_width, frame_height)
-                    
-                    # Head posture detection
-                    vertical_angle, horizontal_angle, _ = calculate_head_pose(frame, face_landmarks.landmark)
-                    smoothed_v, smoothed_h = self.smooth_angles(vertical_angle, horizontal_angle)
-                    
-                    # Determine if head position is abnormal
-                    is_head_misaligned = abs(smoothed_v) > self.posture_threshold or abs(smoothed_h) > self.posture_threshold
-                    
-                    # Track head misalignment
-                    if is_head_misaligned and not self.is_out_of_position:
-                        self.is_out_of_position = True
-                        self.out_of_position_start = time.time()
-                        self.out_of_position_count += 1
-                    elif not is_head_misaligned and self.is_out_of_position:
-                        self.is_out_of_position = False
-                        duration = time.time() - self.out_of_position_start
-                        self.out_of_position_duration += duration
-                        self.posture_changes.append({
-                            "start": self.out_of_position_start,
-                            "end": time.time(),
-                            "duration": duration,
-                            "v_angle": smoothed_v,
-                            "h_angle": smoothed_h
-                        })
-                    
-                    # Gaze detection
-                    direction, _, _ = get_gaze_direction(frame, face_landmarks, frame_width, frame_height)
-                    is_looking_away = direction != "center"
-                    
-                    # Track looking away
-                    if is_looking_away and not self.is_looking_away:
-                        self.is_looking_away = True
-                        self.looking_away_start = time.time()
-                        self.looking_away_count += 1
-                    elif not is_looking_away and self.is_looking_away:
-                        self.is_looking_away = False
-                        duration = time.time() - self.looking_away_start
-                        self.looking_away_duration += duration
-                        self.direction_changes.append({
-                            "start": self.looking_away_start,
-                            "end": time.time(),
-                            "duration": duration,
-                            "direction": direction
-                        })
-                    
-                    # Lip movement detection
-                    is_mouth_moving, is_mouth_open, openness, _ = self.lip_detector.process_frame(frame)
-                    
-                    # Track lip movement
-                    if (is_mouth_moving or is_mouth_open) and not self.is_talking:
-                        self.is_talking = True
-                        self.talking_start = time.time()
-                        self.talking_count += 1
-                    elif not (is_mouth_moving or is_mouth_open) and self.is_talking:
-                        self.is_talking = False
-                        duration = time.time() - self.talking_start
-                        self.talking_duration += duration
-                        self.mouth_open_events.append({
-                            "start": self.talking_start,
-                            "end": time.time(),
-                            "duration": duration,
-                            "openness": openness
-                        })
-            
-            else:
-                # Face is not in frame
-                if not self.is_out_of_bounds:
-                    self.is_out_of_bounds = True
-                    self.out_of_bounds_start = time.time()
-                    self.out_of_bounds_count += 1
-            
-            # If face is back in frame after being out
-            if face_detected and self.is_out_of_bounds:
-                self.is_out_of_bounds = False
-                duration = time.time() - self.out_of_bounds_start
-                self.out_of_bounds_duration += duration
-                self.position_violations.append({
-                    "start": self.out_of_bounds_start,
-                    "end": time.time(),
-                    "duration": duration
-                })
+            # Add frame to processing queue if not full
+            frame_height, frame_width = frame.shape[:2]
+            if not self.frame_queue.full():
+                try:
+                    self.frame_queue.put((frame.copy(), frame_height, frame_width, gray_frame), block=False)
+                except:
+                    pass  # Skip if queue is full
             
             # Display clean webcam feed (no overlays or landmarks)
             cv2.imshow('Webcam Feed', frame)
             
-            # Break loop on 'q' key press
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Break loop on 'q' key press - more responsive than waiting for each frame
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            
+            # Optional: sleep to yield CPU time if we're running too fast
+            if fps > 60:  # If we're over 60fps, no need to use 100% CPU
+                time.sleep(0.001)
+        
+        # Signal threads to stop
+        self.stop_threads = True
+        
+        # Put None to signal threads to exit
+        try:
+            self.frame_queue.put(None, block=False)
+            if self.yolo_detector:
+                self.yolo_queue.put(None, block=False)
+        except:
+            pass
+        
+        # Wait for threads to finish (with timeout)
+        if self.processing_thread:
+            self.processing_thread.join(timeout=1.0)
+        if self.yolo_thread:
+            self.yolo_thread.join(timeout=1.0)
         
         # Release resources
         cap.release()

@@ -370,10 +370,6 @@ class CheatingDetectionSystem:
         cv2.putText(dashboard, f"Blinks: {self.total_blinks} | Gaze: {self.gaze_direction} | Lips: {'Moving' if self.mouth_status['moving'] else 'Still'}", 
                     (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
-        # Add suspicious process warning if any
-        if self.suspicious_processes:
-            cv2.putText(dashboard, "WARNING: Suspicious processes detected!", 
-                        (10, y_pos + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Add YOLO detections if available
         if 'yolo' in self.detection_results:
